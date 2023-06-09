@@ -7,7 +7,7 @@
 - Fabricating TCP packets
 
 ### Project II: MITM and Pharming Attacks in Wi-Fi Networks
-- Scan IP/MAC addresses of the devices in a Wi-Fi network  
+- Scan IP/MAC addresses of the devices in a Wi-Fi network
 - Launch an ARP spoofing attack
 - Launch a man-in-the-middle attack
 - Launch a pharming attack
